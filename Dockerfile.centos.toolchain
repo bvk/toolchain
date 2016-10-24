@@ -1,0 +1,205 @@
+# Copyright (c) 2016 BVK Chaitanya
+# Author: bvkchaitanya@gmail.com
+#
+# This file builds a self-contained toolchain on CentOS docker image.
+
+FROM centos
+MAINTAINER bvkchaitanya@gmail.com.com
+CMD /bin/bash
+
+# User flag to control unit tests.
+ARG CHECK=false
+
+# Install developement tools and copy all source packages.
+RUN yum update -y
+RUN yum groupinstall -y 'Development Tools'
+RUN yum -y install texi2html texinfo which
+
+RUN mkdir /root/pkgs
+COPY pkgs/automake-1.15.tar.gz /root/pkgs/
+COPY pkgs/autoconf-2.69.tar.gz /root/pkgs/
+COPY pkgs/libtool-2.4.6.tar.gz /root/pkgs/
+COPY pkgs/binutils-2.27.tar.gz /root/pkgs/
+COPY pkgs/gcc-6.2.0-all.tar.gz /root/pkgs/
+COPY pkgs/glibc-2.24.tar.gz    /root/pkgs/
+COPY pkgs/linux-4.3.tar.gz     /root/pkgs/
+
+WORKDIR /root
+RUN tar xzf pkgs/automake-1.15.tar.gz
+RUN tar xzf pkgs/autoconf-2.69.tar.gz
+RUN tar xzf pkgs/libtool-2.4.6.tar.gz
+RUN tar xzf pkgs/binutils-2.27.tar.gz
+RUN tar xzf pkgs/gcc-6.2.0-all.tar.gz
+RUN tar xzf pkgs/glibc-2.24.tar.gz
+RUN tar xzf pkgs/linux-4.3.tar.gz
+
+# GNU build tools from the OS distribution could be old and the latest
+# glibc/gcc require newer GNU build tools, so install the latest GNU
+# build tools.
+
+ENV PATH /toolchain/new/bin:/bin:/usr/bin
+
+RUN mkdir /root/automake-new
+WORKDIR /root/automake-new
+RUN ../automake-1.15/configure --prefix=/toolchain/new
+RUN make -j4
+RUN if $CHECK; then make check; fi
+RUN make install
+
+RUN mkdir /root/autoconf-new
+WORKDIR /root/autoconf-new
+RUN ../autoconf-2.69/configure --prefix=/toolchain/new
+RUN make -j4
+RUN if $CHECK; then make check; fi
+RUN make install
+
+RUN mkdir /root/libtool-new
+WORKDIR /root/libtool-new
+RUN ../libtool-2.4.6/configure --prefix=/toolchain/new
+RUN make -j4
+RUN if $CHECK; then make check; fi
+RUN make install
+
+#
+# Cross compile binutils and gcc packages and build the target glibc.
+#
+
+ENV ARCH x86_64
+ENV TARGET x86_64-custom-linux-gnu
+ENV SYSROOT /toolchain/final
+ENV PATH /toolchain/cross/bin:/toolchain/new/bin:/bin:/usr/bin
+RUN mkdir -p $SYSROOT/include $SYSROOT/lib
+RUN ln -nsf . $SYSROOT/usr
+RUN ln -nsf . $SYSROOT/final
+RUN ln -nsf . $SYSROOT/toolchain
+RUN ln -nsf lib $SYSROOT/lib64
+
+RUN mkdir /root/binutils-cross
+WORKDIR /root/binutils-cross
+RUN ../binutils-2.27/configure --prefix=/toolchain/cross --target=$TARGET --with-sysroot=$SYSROOT
+RUN make -j4
+RUN if $CHECK; then make check; fi
+RUN make install
+
+RUN mkdir /root/gcc-cross-one
+WORKDIR /root/gcc-cross-one
+RUN ../gcc-6.2.0/configure --prefix=/toolchain/cross --target=$TARGET --enable-languages=c --disable-shared --disable-bootstrap --disable-multilib --disable-decimal-float --disable-threads --disable-libatomic --disable-libgomp --disable-libmpx --disable-libquadmath --disable-libssp --disable-libvtv --disable-libstdcxx
+RUN make -j4
+RUN if $CHECK; then ulimit -s 32768 && make check; fi
+RUN make install
+
+WORKDIR /root/linux-4.3
+RUN make headers_install ARCH=$ARCH INSTALL_HDR_PATH=$SYSROOT/usr
+
+RUN mkdir /root/glibc-toolchain
+WORKDIR /root/glibc-toolchain
+RUN ../glibc-2.24/configure --prefix=$SYSROOT/usr --host=$TARGET --with-headers=$SYSROOT/usr/include libc_cv_forced_unwind=yes libc_cv_c_cleanup=yes libc_cv_ssp=no libc_cv_ssp_strong=no
+RUN make -j4
+RUN if $CHECK; then make check; fi
+RUN make install
+
+RUN mkdir /root/gcc-cross-two
+WORKDIR /root/gcc-cross-two
+RUN ../gcc-6.2.0/configure --prefix=/toolchain/cross --target=$TARGET --with-sysroot=$SYSROOT --enable-languages=c,c++ --disable-multilib
+RUN make -j4
+RUN if $CHECK; then ulimit -s 32768 && make check; fi
+RUN make install
+
+#
+# Using the above cross-compiler build all packages for the toolchain
+#
+
+ENV CFLAGS    "-O2 -g -Wl,--dynamic-linker=$SYSROOT/lib/ld-linux-x86-64.so.2 -Wl,-rpath=$SYSROOT/lib"
+ENV LDFLAGS   "-O2 -g -Wl,--dynamic-linker=$SYSROOT/lib/ld-linux-x86-64.so.2 -Wl,-rpath=$SYSROOT/lib"
+ENV CXXFLAGS  "-O2 -g -Wl,--dynamic-linker=$SYSROOT/lib/ld-linux-x86-64.so.2 -Wl,-rpath=$SYSROOT/lib"
+
+RUN mkdir /root/binutils-toolchain
+WORKDIR /root/binutils-toolchain
+RUN ../binutils-2.27/configure --build=$TARGET --host=$TARGET --target=$TARGET --prefix=$SYSROOT/usr --with-sysroot=$SYSROOT
+RUN make -j4
+RUN if $CHECK; then make check; fi
+RUN make install
+
+RUN mkdir /root/gcc-toolchain
+WORKDIR /root/gcc-toolchain
+RUN ../gcc-6.2.0/configure --build=$TARGET --host=$TARGET --target=$TARGET --prefix=$SYSROOT/usr --with-sysroot=$SYSROOT --with-build-sysroot=$SYSROOT --with-native-system-headers-dir=$SYSROOT/usr/include --enable-languages=c,c++ --disable-multilib
+RUN make -j4
+RUN if $CHECK; then ulimit -s 32768 && make check; fi
+RUN make install
+
+ENV PATH $SYSROOT/bin:/bin:/usr/bin
+
+WORKDIR /root
+COPY pkgs/Python-2.7.11.tar.gz /root/pkgs/
+RUN tar xzf pkgs/Python-2.7.11.tar.gz
+RUN mkdir /root/python-toolchain
+WORKDIR /root/python-toolchain
+RUN ../Python-2.7.11/configure --prefix=$SYSROOT/usr
+RUN make -j4
+RUN make install
+
+WORKDIR /root
+COPY pkgs/boost_1_62_0.tar.gz /root/pkgs/
+RUN tar xzf pkgs/boost_1_62_0.tar.gz
+WORKDIR /root/boost_1_62_0
+RUN ./bootstrap.sh --prefix=$SYSROOT/usr
+RUN ./b2 install
+
+WORKDIR /root
+COPY pkgs/gflags-2.0.tar.gz /root/pkgs/
+RUN tar xzf pkgs/gflags-2.0.tar.gz
+RUN mkdir /root/gflags-toolchain
+WORKDIR /root/gflags-toolchain
+RUN ../gflags-2.0/configure --prefix=$SYSROOT/usr
+RUN make -j4
+RUN if $CHECK; then make check; fi
+RUN make install
+
+WORKDIR /root
+COPY pkgs/glog-0.3.4.tar.gz /root/pkgs/
+RUN tar xzf pkgs/glog-0.3.4.tar.gz
+RUN mkdir /root/glog-toolchain
+WORKDIR /root/glog-toolchain
+RUN ../glog-0.3.4/configure --prefix=$SYSROOT/usr
+RUN make -j4
+RUN if $CHECK; then make check; fi
+RUN make install
+
+WORKDIR /root
+COPY pkgs/protobuf-3.0.0-all.tar.gz /root/pkgs/
+RUN tar xzf pkgs/protobuf-3.0.0-all.tar.gz
+WORKDIR /root/protobuf-3.0.0
+RUN ./autogen.sh
+RUN mkdir /root/protobuf-toolchain
+WORKDIR /root/protobuf-toolchain
+RUN ../protobuf-3.0.0/configure --prefix=$SYSROOT/usr
+RUN make -j4
+RUN if $CHECK; then make check; fi
+RUN make install
+
+WORKDIR /root
+COPY pkgs/grpc-1.0.0.tar.gz /root/pkgs/
+RUN tar xzf pkgs/grpc-1.0.0.tar.gz
+WORKDIR /root/grpc-1.0.0
+RUN make V=1 -j4
+RUN if $CHECK; then make test; fi
+RUN make install
+
+WORKDIR /root
+COPY pkgs/jansson-2.9.tar.gz /root/pkgs/
+RUN tar xzf pkgs/jansson-2.9.tar.gz
+RUN mkdir /root/jansson-toolchain
+WORKDIR /root/jansson-toolchain
+RUN ../jansson-2.9/configure --prefix=$SYSROOT/usr
+RUN make -j4
+RUN if $CHECK; then make check; fi
+RUN make install
+
+WORKDIR /root
+COPY pkgs/openssl-1.1.0b.tar.gz /root/pkgs/
+RUN tar xzf pkgs/openssl-1.1.0b.tar.gz
+WORKDIR /root/openssl-1.1.0b
+RUN ./config --prefix=$SYSROOT/usr $CFLAGS
+RUN make -j4
+RUN if $CHECK; then make test; fi
+RUN make install
